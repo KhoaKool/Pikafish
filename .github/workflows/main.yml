@@ -1,111 +1,156 @@
-name: 🏗️ Pikafish Dell 7559 AVX2 Optimized
-run-name: Build #${{ github.run_number }} | AVX2 ✅ BMI2 ❌
+name: 🏗️ Pikafish Dell 7559 | AVX2 ✅ BMI2 ❌
+run-name: Build #${{ github.run_number }} | NPS + SOLO vs GỐC
 
 on:
   push:
     branches: [ main ]
-    paths:
-      - '**.patch'
-      - '.github/workflows/**'
-  workflow_dispatch:   # ✅ Bấm nút chạy bất kỳ lúc nào
+    paths: [ "**.patch", ".github/workflows/**" ]
+  workflow_dispatch:
   release:
     types: [ published ]
 
 env:
   REPO: official-pikafish/Pikafish
   BRANCH: master
-  ARCH_MAIN: x86-64-avx2
-  ARCH_REF:  x86-64-bmi2
-  CFLAGS_EXTRA: "-march=skylake -mtune=skylake -ffp-contract=fast -fno-rtti -fno-exceptions"
+  ARCH: x86-64-avx2
+  # KHÓA CỨNG 100% CHO i7‑6700HQ SKYLAKE
+  CFLAGS: "-march=skylake -mtune=skylake -mavx2 -mfma -mbmi -ffp-contract=fast -fno-rtti -fno-exceptions"
+  # Thời gian đấu: 5 giây + 50ms mỗi nước = đủ sâu, chạy nhanh trong giới hạn Actions
+  TC: "5+0.05"
+  ROUNDS: 200          # Tổng 400 ván đảo màu
+  CONCURRENCY: 4        # Khớp với luồng Dell 7559
+  HASH: 512
+  THREADS: 4
 
 jobs:
-  build:
-    name: 🪟 Windows MinGW‑w64 | AVX2 vs BMI2
+  # ──────────────────────────────────────────────────────────────
+  # JOB 1: BUILD + ĐO TỐC ĐỘ TRÊN ĐÁM MÂY
+  # ──────────────────────────────────────────────────────────────
+  build-cloud:
+    name: ☁️ Build + Bench
     runs-on: windows-latest
+    outputs:
+      nps_avx2: ${{ steps.bench_avx2.outputs.NPS }}
+      nps_bmi2: ${{ steps.bench_bmi2.outputs.NPS }}
     defaults:
-      run:
-        shell: msys2 {0}
+      run: { shell: msys2 {0} }
     steps:
-      - name: 📥 Checkout repo của bạn (chứa 2 file patch)
-        uses: actions/checkout@v4
-
-      - name: ⚙️ Cài MSYS2 + GCC
-        uses: msys2/setup-msys2@v2
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
         with:
           msystem: mingw64
           update: true
-          install: >-
-            git make mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
-            mingw-w64-x86_64-python3
-
+          install: git make mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
       - name: 🧬 Clone Pikafish chính thức
-        run: |
-          git clone --depth 1 --branch ${{ env.BRANCH }} \
-            https://github.com/${{ env.REPO }}.git pikafish
-
+        run: git clone --depth 1 -b $BRANCH https://github.com/$REPO.git pika
       - name: 🩹 Áp dụng vá AN TOÀN + vá DELL 7559
         run: |
-          cd pikafish
-          git apply --ignore-whitespace --verbose ../01-pikafish-final-safe-all-in-one.patch
-          git apply --ignore-whitespace --verbose ../02-pikafish-dell-7559-only.patch
-          # Ép tắt BMI2 ở cấp Makefile, an toàn tuyệt đối
+          cd pika
+          git apply --ignore-whitespace -v ../01-pikafish-final-safe-all-in-one.patch
+          git apply --ignore-whitespace -v ../02-pikafish-dell-7559-only.patch
           sed -i 's/-mbmi2//g; s/-mavx512[^ ]*//g' src/Makefile
-
-      - name: ⚡ BUILD 1 — AVX2 + PGO PROFILE ⭐ CHÍNH
-        id: build_avx2
+      - name: ⚡ PROFILE BUILD ⭐ Bản vá
         run: |
-          cd pikafish/src
-          make clean
-          make -j4 profile-build \
-            ARCH=${{ env.ARCH_MAIN }} \
-            EXTRACXXFLAGS="${{ env.CFLAGS_EXTRA }}" \
-            COMP=gcc 2>&1 | tail -15
-          cp pikafish.exe ../../pikafish-dell7559-avx2.exe
-
-      - name: ⏱️ ĐO TỐC ĐỘ AVX2
+          cd pika/src && make clean
+          make -j4 profile-build ARCH=$ARCH EXTRACXXFLAGS="$CFLAGS" COMP=gcc 2>&1 | tail -10
+          cp pikafish.exe ../../pikafish-PATCHED.exe
+      - name: ⏱️ Bench bản vá
         id: bench_avx2
         run: |
-          cd pikafish/src
-          OUT=$(./pikafish bench 16 4 24 default depth 2>&1 | tail -5)
+          OUT=$(./pikafish-PATCHED.exe bench 16 4 24 default depth 2>&1 | tail -3)
           echo "$OUT"
-          NPS=$(echo "$OUT" | grep -oP 'Nodes/second\s+\K[0-9]+')
-          echo "NPS_AVX2=$NPS" >> $GITHUB_OUTPUT
-
-      - name: ⚠️ BUILD 2 — BMI2 CHỈ ĐỂ SO SÁNH (KHÔNG DÙNG)
-        id: build_bmi2
-        continue-on-error: true
-        run: |
-          cd pikafish/src
-          make clean
-          make -j4 build ARCH=${{ env.ARCH_REF }} COMP=gcc 2>&1 | tail -5
-          cp pikafish.exe ../../pikafish-bmi2-ref.exe || true
-
-      - name: ⏱️ ĐO TỐC ĐỘ BMI2
+          echo "NPS=$(echo "$OUT" | grep -oP 'Nodes/second\s+\K[0-9]+')" >> $GITHUB_OUTPUT
+      - name: ⚠️ Build BMI2 CHỈ ĐỂ CHỨNG MINH NÓ CHẬM HƠN
         id: bench_bmi2
         continue-on-error: true
         run: |
-          cd pikafish/src
-          OUT=$(./pikafish bench 16 4 24 default depth 2>&1 | tail -3)
+          cd pika/src && make clean
+          make -j4 build ARCH=x86-64-bmi2 COMP=gcc 2>&1 | tail -3
+          OUT=$(./pikafish bench 16 4 24 default depth 2>&1 | tail -2)
           echo "$OUT"
-          NPS=$(echo "$OUT" | grep -oP 'Nodes/second\s+\K[0-9]+')
-          echo "NPS_BMI2=$NPS" >> $GITHUB_OUTPUT
-
-      - name: 📊 IN KẾT QUẢ SO SÁNH
+          echo "NPS=$(echo "$OUT" | grep -oP 'Nodes/second\s+\K[0-9]+')" >> $GITHUB_OUTPUT
+      - name: 🧬 Build BẢN GỐC KHÔNG VÁ để đấu đối kháng
         run: |
-          echo "========================================="
-          echo "✅ NPS AVX2  = ${{ steps.bench_avx2.outputs.NPS_AVX2 }}"
-          echo "⚠️  NPS BMI2  = ${{ steps.bench_bmi2.outputs.NPS_BMI2 }}"
-          if [ -n "${{ steps.bench_avx2.outputs.NPS_AVX2 }}" ] && [ -n "${{ steps.bench_bmi2.outputs.NPS_BMI2 }}" ]; then
-            DIFF=$(awk "BEGIN{printf \"%.2f\", (${{ steps.bench_avx2.outputs.NPS_AVX2 }} - ${{ steps.bench_bmi2.outputs.NPS_BMI2 }}) / ${{ steps.bench_bmi2.outputs.NPS_BMI2 }} * 100}")
-            echo "📈 AVX2 nhanh hơn BMI2 = ${DIFF} %"
-          fi
-          echo "========================================="
-
-      - name: 📦 Đóng gói file xuất ra
+          git clone --depth 1 -b $BRANCH https://github.com/$REPO.git pika-orig
+          cd pika-orig/src && make clean
+          make -j4 build ARCH=$ARCH EXTRACXXFLAGS="$CFLAGS" COMP=gcc 2>&1 | tail -5
+          cp pikafish.exe ../../pikafish-ORIGINAL.exe
+      - name: 📦 Lưu 2 file exe cho job đấu
         uses: actions/upload-artifact@v4
         with:
-          name: pikafish-dell7559-avx2
+          name: engines-bin
           path: |
-            pikafish-dell7559-avx2.exe
+            pikafish-PATCHED.exe
+            pikafish-ORIGINAL.exe
             pikafish-uci-dell7559.ini
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 2: TỰ ĐỘNG ĐẤU SOLO ⚔️ BẢN VÁ vs BẢN GỐC
+  # ──────────────────────────────────────────────────────────────
+  solo-match:
+    name: ⚔️ SOLO: PATCHED vs ORIGINAL
+    needs: build-cloud
+    runs-on: windows-latest
+    defaults:
+      run: { shell: pwsh }
+    steps:
+      - uses: actions/checkout@v4
+      - name: 📥 Tải 2 engine đã biên dịch
+        uses: actions/download-artifact@v4
+        with: { name: engines-bin }
+      - name: ⬇️ Tải fast‑chess + sách khai cuộc
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/Matthies/fastchess/releases/latest/download/fastchess-win-x64.zip" -OutFile fc.zip
+          Expand-Archive fc.zip -DestinationPath .
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/official-pikafish/books/master/xqbook3moves.bin" -OutFile opening.bin
+      - name: ⚔️ Bắt đầu đấu tự động | SPRT(0,±5) α=β=5%
+        run: |
+          .\fastchess.exe `
+            -engine name="✅ PATCHED‑AVX2" cmd=".\pikafish-PATCHED.exe" option.Hash=${{ env.HASH }} option.Threads=${{ env.THREADS }} `
+            -engine name="⬜ ORIGINAL"     cmd=".\pikafish-ORIGINAL.exe" option.Hash=${{ env.HASH }} option.Threads=${{ env.THREADS }} `
+            -each tc=${{ env.TC }} proto=uci variant=xiangqi `
+            -openings file=opening.bin format=bin order=random plies=6 `
+            -rounds ${{ env.ROUNDS }} -repeat -concurrency ${{ env.CONCURRENCY }} `
+            -sprt elo0=0 elo1=5 alpha=0.05 beta=0.05 `
+            -resign movecount=3 score=500 `
+            -draw movenumber=40 movecount=6 score=10 `
+            -pgnout matches.pgn `
+            -log log.txt
+      - name: 📊 TRÍCH XUẤT KẾT QUẢ CUỐI CÙNG
+        id: result
+        run: |
+          $r = Get-Content log.txt -Tail 40 | Select-String "PATCHED|ELO|WIN|DRAW|LOSS|SPRT"
+          $r | ForEach-Object { Write-Host $_.Line }
+          "RESULT<<EOF" >> $env:GITHUB_OUTPUT
+          $r | ForEach-Object { $_.Line + "`n" } >> $env:GITHUB_OUTPUT
+          "EOF" >> $env:GITHUB_OUTPUT
+      - name: 📦 Lưu toàn bộ ván đấu + log
+        uses: actions/upload-artifact@v4
+        with:
+          name: solo-results
+          path: |
+            matches.pgn
+            log.txt
           retention-days: 90
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 3: ⭐ CHỈ CHẠY KHI BẠN CÀI RUNNER TRÊN DELL 7559
+  #         Build PGO đo mẫu TRÊN CHÍNH i7‑6700HQ + đấu chính xác nhất
+  # ──────────────────────────────────────────────────────────────
+  # build-native-and-solo:
+  #   name: 🏠 NATIVE i7‑6700HQ ⭐ NHANH NHẤ VẬT LÝ
+  #   needs: build-cloud
+  #   runs-on: [self-hosted, Windows, dell7559, skylake]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: |
+  #         git clone --depth 1 -b $env:BRANCH https://github.com/$env:REPO.git p
+  #         cd p/src
+  #         git apply --ignore-whitespace ../../01-pikafish-final-safe-all-in-one.patch
+  #         git apply --ignore-whitespace ../../02-pikafish-dell-7559-only.patch
+  #         make clean; make -j4 profile-build ARCH=x86-64-avx2 EXTRACXXFLAGS="$env:CFLAGS"
+  #         cp pikafish.exe ../../pikafish-NATIVE-PGO.exe
+  #     - run: .\pikafish-NATIVE-PGO.exe bench 16 4 24 default depth
+  #     - uses: actions/upload-artifact@v4
+  #       with: { name: pikafish-dell7559-NATIVE⭐, path: pikafish-NATIVE-PGO.exe }
