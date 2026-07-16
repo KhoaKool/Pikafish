@@ -1,0 +1,111 @@
+name: 🏗️ Pikafish Dell 7559 AVX2 Optimized
+run-name: Build #${{ github.run_number }} | AVX2 ✅ BMI2 ❌
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**.patch'
+      - '.github/workflows/**'
+  workflow_dispatch:   # ✅ Bấm nút chạy bất kỳ lúc nào
+  release:
+    types: [ published ]
+
+env:
+  REPO: official-pikafish/Pikafish
+  BRANCH: master
+  ARCH_MAIN: x86-64-avx2
+  ARCH_REF:  x86-64-bmi2
+  CFLAGS_EXTRA: "-march=skylake -mtune=skylake -ffp-contract=fast -fno-rtti -fno-exceptions"
+
+jobs:
+  build:
+    name: 🪟 Windows MinGW‑w64 | AVX2 vs BMI2
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: 📥 Checkout repo của bạn (chứa 2 file patch)
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Cài MSYS2 + GCC
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: true
+          install: >-
+            git make mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-python3
+
+      - name: 🧬 Clone Pikafish chính thức
+        run: |
+          git clone --depth 1 --branch ${{ env.BRANCH }} \
+            https://github.com/${{ env.REPO }}.git pikafish
+
+      - name: 🩹 Áp dụng vá AN TOÀN + vá DELL 7559
+        run: |
+          cd pikafish
+          git apply --ignore-whitespace --verbose ../01-pikafish-final-safe-all-in-one.patch
+          git apply --ignore-whitespace --verbose ../02-pikafish-dell-7559-only.patch
+          # Ép tắt BMI2 ở cấp Makefile, an toàn tuyệt đối
+          sed -i 's/-mbmi2//g; s/-mavx512[^ ]*//g' src/Makefile
+
+      - name: ⚡ BUILD 1 — AVX2 + PGO PROFILE ⭐ CHÍNH
+        id: build_avx2
+        run: |
+          cd pikafish/src
+          make clean
+          make -j4 profile-build \
+            ARCH=${{ env.ARCH_MAIN }} \
+            EXTRACXXFLAGS="${{ env.CFLAGS_EXTRA }}" \
+            COMP=gcc 2>&1 | tail -15
+          cp pikafish.exe ../../pikafish-dell7559-avx2.exe
+
+      - name: ⏱️ ĐO TỐC ĐỘ AVX2
+        id: bench_avx2
+        run: |
+          cd pikafish/src
+          OUT=$(./pikafish bench 16 4 24 default depth 2>&1 | tail -5)
+          echo "$OUT"
+          NPS=$(echo "$OUT" | grep -oP 'Nodes/second\s+\K[0-9]+')
+          echo "NPS_AVX2=$NPS" >> $GITHUB_OUTPUT
+
+      - name: ⚠️ BUILD 2 — BMI2 CHỈ ĐỂ SO SÁNH (KHÔNG DÙNG)
+        id: build_bmi2
+        continue-on-error: true
+        run: |
+          cd pikafish/src
+          make clean
+          make -j4 build ARCH=${{ env.ARCH_REF }} COMP=gcc 2>&1 | tail -5
+          cp pikafish.exe ../../pikafish-bmi2-ref.exe || true
+
+      - name: ⏱️ ĐO TỐC ĐỘ BMI2
+        id: bench_bmi2
+        continue-on-error: true
+        run: |
+          cd pikafish/src
+          OUT=$(./pikafish bench 16 4 24 default depth 2>&1 | tail -3)
+          echo "$OUT"
+          NPS=$(echo "$OUT" | grep -oP 'Nodes/second\s+\K[0-9]+')
+          echo "NPS_BMI2=$NPS" >> $GITHUB_OUTPUT
+
+      - name: 📊 IN KẾT QUẢ SO SÁNH
+        run: |
+          echo "========================================="
+          echo "✅ NPS AVX2  = ${{ steps.bench_avx2.outputs.NPS_AVX2 }}"
+          echo "⚠️  NPS BMI2  = ${{ steps.bench_bmi2.outputs.NPS_BMI2 }}"
+          if [ -n "${{ steps.bench_avx2.outputs.NPS_AVX2 }}" ] && [ -n "${{ steps.bench_bmi2.outputs.NPS_BMI2 }}" ]; then
+            DIFF=$(awk "BEGIN{printf \"%.2f\", (${{ steps.bench_avx2.outputs.NPS_AVX2 }} - ${{ steps.bench_bmi2.outputs.NPS_BMI2 }}) / ${{ steps.bench_bmi2.outputs.NPS_BMI2 }} * 100}")
+            echo "📈 AVX2 nhanh hơn BMI2 = ${DIFF} %"
+          fi
+          echo "========================================="
+
+      - name: 📦 Đóng gói file xuất ra
+        uses: actions/upload-artifact@v4
+        with:
+          name: pikafish-dell7559-avx2
+          path: |
+            pikafish-dell7559-avx2.exe
+            pikafish-uci-dell7559.ini
+          retention-days: 90
